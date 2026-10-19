@@ -1,0 +1,61 @@
+name: Android-APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Web-Spiel bauen
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: APK bauen
+        working-directory: android
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+          VERSION_NAME: 0.1.${{ github.run_number }}
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: APK umbenennen
+        run: cp android/app/build/outputs/apk/release/app-release.apk PixelPolis.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PixelPolis-apk
+          path: PixelPolis.apk
+
+      - name: Release veröffentlichen
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: PixelPolis 0.1.${{ github.run_number }}
+          body: |
+            Installierbare APK für Android 7 oder neuer. Auf dem Handy herunterladen und öffnen.
+            Updates lassen sich über die vorherige Version installieren, Spielstände bleiben erhalten.
+          files: PixelPolis.apk
+          make_latest: true
