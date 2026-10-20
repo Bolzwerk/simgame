@@ -184,6 +184,18 @@ img {
   font-size: 10px;
   line-height: 1.1;
 }
+/* Querformat mit wenig Höhe: alle 13 Kategorien sollen ohne Scrollen passen */
+@media (max-height: 820px) and (min-aspect-ratio: 3/4) {
+  .btn.tool {
+    min-height: 0;
+    flex: 1 1 0;
+    max-height: 56px;
+  }
+  .btn.tool img {
+    width: min(40px, calc((100vh - var(--top-h)) / 13 - 18px));
+    height: min(40px, calc((100vh - var(--top-h)) / 13 - 18px));
+  }
+}
 #hint {
   top: calc(var(--top-h) + 4px);
   left: calc(var(--tool-w) + 4px);

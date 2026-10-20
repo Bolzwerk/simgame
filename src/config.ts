@@ -17,6 +17,9 @@ export enum Zone {
 export const NET_ROAD = 1;
 export const NET_POWER = 2;
 
+/** Monate, in denen alte Spielstände nach Einführung der Wasserversorgung keine Hochhäuser verlieren. */
+export const WATER_GRACE_MONTHS = 120;
+
 export const TICKS_PER_MONTH = 4;
 export const MONTHS = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
 
@@ -86,7 +89,7 @@ export const DIFFICULTIES: Record<Difficulty, DiffSettings> = {
   },
 };
 
-export type Category = 'power' | 'service' | 'park' | 'special';
+export type Category = 'power' | 'water' | 'service' | 'park' | 'special';
 
 export interface BuildingDef {
   id: number;
@@ -97,6 +100,7 @@ export interface BuildingDef {
   cost: number;
   upkeep: number; // pro Jahr
   power?: number; // Kapazität in Stromeinheiten
+  water?: number; // Fördermenge in Wassereinheiten
   pollution?: number;
   radius?: number;
   coverage?: 'police' | 'fire' | 'health' | 'edu';
@@ -123,7 +127,13 @@ const defs: Omit<BuildingDef, 'id'>[] = [
   { key: 'stadium', name: 'Stadion', cat: 'park', size: 3, cost: 6000, upkeep: 200, radius: 20, landValue: 15, demand: { r: 0.15 }, unlockPop: 10000 },
   { key: 'seaport', name: 'Hafen', cat: 'special', size: 3, cost: 5000, upkeep: 150, pollution: 30, needsWater: true, demand: { i: 0.25 }, unlockPop: 2500 },
   { key: 'airport', name: 'Flughafen', cat: 'special', size: 4, cost: 10000, upkeep: 300, pollution: 20, demand: { c: 0.25 }, unlockPop: 6000 },
+  // neue Gebäude immer hinten anfügen: die id steht in den Spielständen
+  { key: 'pump', name: 'Wasserpumpe', cat: 'water', size: 1, cost: 150, upkeep: 15, water: 60 },
+  { key: 'watertower', name: 'Wasserturm', cat: 'water', size: 2, cost: 600, upkeep: 40, water: 400 },
 ];
+
+/** Zusätzliche Fördermenge einer Pumpe direkt am Wasser. */
+export const PUMP_SHORE_BONUS = 90;
 
 export const BUILDINGS: BuildingDef[] = defs.map((d, i) => ({ ...d, id: i + 1 }));
 export const BUILDING_BY_KEY: Record<string, BuildingDef> = Object.fromEntries(BUILDINGS.map((b) => [b.key, b]));
@@ -137,6 +147,7 @@ export const COSTS = {
   road: 10,
   bridge: 50,
   power: 5,
+  pipe: 4,
   zoneLight: 5,
   zoneDense: 10,
   bulldoze: 5,
@@ -149,6 +160,7 @@ export const COSTS = {
 export const UPKEEP = {
   road: 0.6, // pro Kachel und Jahr
   power: 0.2,
+  pipe: 0.2,
 };
 
 export const CITY_RANKS: [number, string][] = [

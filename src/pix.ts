@@ -31,6 +31,9 @@ export function ramp(...hexes: string[]): Color[] {
   return hexes.map(hex);
 }
 
+/** Pixeldaten der aus PixBufs erzeugten Canvas-Elemente (für Tiefenpuffer und Effekte). */
+export const CANVAS_PIXELS = new WeakMap<HTMLCanvasElement, Uint32Array>();
+
 export class PixBuf {
   readonly data: Uint32Array;
   constructor(
@@ -46,8 +49,17 @@ export class PixBuf {
     if (c >>> 24 === 255) this.data[y * this.w + x] = c;
     else if (c >>> 24) {
       const d = this.data[y * this.w + x];
-      if (!(d >>> 24)) this.data[y * this.w + x] = c;
-      else this.data[y * this.w + x] = mix(d, c | 0xff000000, (c >>> 24) / 255) | 0xff000000;
+      const da = d >>> 24;
+      if (!da) this.data[y * this.w + x] = c;
+      else if (da === 255) this.data[y * this.w + x] = mix(d, c | 0xff000000, (c >>> 24) / 255) | 0xff000000;
+      else {
+        // halbtransparent über halbtransparent (z. B. überlappende Schatten)
+        const a = (c >>> 24) / 255;
+        const b = da / 255;
+        const oa = a + b * (1 - a);
+        const t = a / oa;
+        this.data[y * this.w + x] = alpha(mix(d, c, t), Math.round(oa * 255));
+      }
     }
   }
   get(x: number, y: number): Color {
@@ -89,6 +101,7 @@ export class PixBuf {
     const img = ctx.createImageData(this.w, this.h);
     new Uint32Array(img.data.buffer).set(this.data);
     ctx.putImageData(img, 0, 0);
+    CANVAS_PIXELS.set(cv, this.data);
     return cv;
   }
 }

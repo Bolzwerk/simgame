@@ -19,6 +19,8 @@ export const TOOLS: Record<string, ToolDef> = {
   bulldoze: { id: 'bulldoze', label: 'Abreißen', shape: 'rect', desc: `${COSTS.bulldoze} $ pro Feld` },
   road: { id: 'road', label: 'Straße', shape: 'line', desc: `${COSTS.road} $ pro Feld, Brücke ${COSTS.bridge} $` },
   power: { id: 'power', label: 'Stromleitung', shape: 'line', desc: `${COSTS.power} $ pro Feld` },
+  pipe: { id: 'pipe', label: 'Wasserrohr', shape: 'line', desc: `${COSTS.pipe} $ pro Feld, unterirdisch` },
+  unpipe: { id: 'unpipe', label: 'Rohre entfernen', shape: 'rect', desc: 'Entfernt Wasserrohre kostenlos' },
   zoneR: { id: 'zoneR', label: 'Wohnen leicht', shape: 'rect', desc: `${COSTS.zoneLight} $ pro Feld` },
   zoneRd: { id: 'zoneRd', label: 'Wohnen dicht', shape: 'rect', desc: `${COSTS.zoneDense} $ pro Feld` },
   zoneC: { id: 'zoneC', label: 'Gewerbe leicht', shape: 'rect', desc: `${COSTS.zoneLight} $ pro Feld` },
@@ -176,6 +178,21 @@ export function planTool(wd: World, toolId: string, a: number, b: number): Plan 
       }
       return checkMoney(wd, plan);
     }
+    case 'pipe': {
+      const path = linePath(wd, a, b);
+      plan.tiles = path;
+      for (const i of path) {
+        if (wd.pipe[i] || wd.zone[i] || wd.bld[i]) continue; // Zonen und Gebäude leiten ohnehin
+        plan.cost += wd.isWater(i) ? COSTS.pipe * 3 : COSTS.pipe;
+        plan.apply.push(i);
+      }
+      return checkMoney(wd, plan);
+    }
+    case 'unpipe': {
+      plan.tiles = rectTiles(wd, a, b);
+      for (const i of plan.tiles) if (wd.pipe[i]) plan.apply.push(i);
+      return plan;
+    }
     case 'bulldoze': {
       plan.tiles = rectTiles(wd, a, b);
       const done = new Set<number>();
@@ -325,6 +342,14 @@ export function applyPlan(wd: World, toolId: string, plan: Plan): void {
       wd.powerDirty = true;
       break;
     }
+    case 'pipe':
+    case 'unpipe':
+      for (const i of plan.apply) {
+        wd.pipe[i] = toolId === 'pipe' ? 1 : 0;
+        wd.changedWithNeighbors(i);
+      }
+      wd.powerDirty = true;
+      break;
     case 'bulldoze':
       for (const i of plan.apply) wd.clearTile(i);
       break;

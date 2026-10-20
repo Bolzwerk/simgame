@@ -1,16 +1,18 @@
 // Isometrische Darstellung mit Chunk-Zwischenspeicher.
 
 import { BLD_MAX_H, BUILDINGS, CHUNK, HH, HS, HW, MAXH, NET_POWER, NET_ROAD, Zone } from './config';
+import { Animator } from './anim';
 import { alpha, Color, hex, rgb } from './pix';
 import { hash2 } from './rng';
 import type { Simulation } from './sim';
-import { Sprite, SpriteCache } from './sprites';
+import { Sprite, SpriteCache, spritePixels } from './sprites';
 import { World } from './world';
 
-export type Overlay = 'power' | 'landValue' | 'pollution' | 'crime' | 'traffic' | 'police' | 'fire' | 'edu' | 'health';
+export type Overlay = 'power' | 'water' | 'landValue' | 'pollution' | 'crime' | 'traffic' | 'police' | 'fire' | 'edu' | 'health';
 
 export const OVERLAYS: { key: Overlay; label: string }[] = [
   { key: 'power', label: 'Strom' },
+  { key: 'water', label: 'Wasser' },
   { key: 'landValue', label: 'Bodenwert' },
   { key: 'pollution', label: 'Verschmutzung' },
   { key: 'crime', label: 'Kriminalität' },
@@ -66,6 +68,11 @@ export class Renderer {
   private cols: number;
   private rows: number;
   private chunks: (HTMLCanvasElement | null)[];
+  /** Tiefenpuffer je Chunk: 2·(x+y)+1 für Gelände, +2 für Objekte, 0 = leer. */
+  private depth: (Uint16Array | null)[];
+  private curDepth: Uint16Array | null = null;
+  private curCx = 0;
+  private curCy = 0;
   private dirty: Uint8Array;
   private chunkTiles: Int32Array[];
   private tileChunks: Int32Array[];
@@ -76,8 +83,11 @@ export class Renderer {
   hover = -1;
   private ctx: CanvasRenderingContext2D;
   private unpowered: number[] = [];
+  private dry: number[] = [];
   private unpoweredAt = 0;
   sim: Simulation | null = null;
+  private fx: Animator;
+  private layer = new PixLayer();
 
   constructor(
     public wd: World,
@@ -91,6 +101,7 @@ export class Renderer {
     this.rows = Math.ceil(this.worldH / CHUNK);
     const nc = this.cols * this.rows;
     this.chunks = new Array(nc).fill(null);
+    this.depth = new Array(nc).fill(null);
     this.dirty = new Uint8Array(nc).fill(1);
     this.ctx = canvas.getContext('2d')!;
     this.sprites.grid = wd.settings.grid;
@@ -124,6 +135,42 @@ export class Renderer {
     this.tileChunks = tc.map((l) => Int32Array.from(l));
     wd.onTileChanged = (i) => this.invalidateTile(i);
     this.centerOn(wd.w / 2, wd.h / 2);
+    this.fx = new Animator(this);
+  }
+
+  // ---------------- Pixelebene für bewegte Objekte ----------------
+
+  dot(wx: number, wy: number, dmax: number, c: Color): void {
+    const L = this.layer;
+    wx = Math.round(wx);
+    wy = Math.round(wy);
+    const lx = wx - L.x0;
+    const ly = wy - L.y0;
+    if (lx < 0 || ly < 0 || lx >= L.w || ly >= L.h) return;
+    if (wx >= 0 && wy >= 0) {
+      const cc = wx >> 8;
+      if (cc < this.cols) {
+        const db = this.depth[(wy >> 8) * this.cols + cc];
+        if (db && db[((wy & 255) << 8) | (wx & 255)] > dmax) return;
+      }
+    }
+    L.plot(lx, ly, c);
+  }
+
+  blit(s: Sprite, x: number, y: number, dmax: number): void {
+    const px = spritePixels(s);
+    const W = s.cv.width;
+    const left = Math.round(x - s.ax);
+    const top = Math.round(y - s.ay);
+    for (let j = 0; j < s.cv.height; j++)
+      for (let k = 0; k < W; k++) {
+        const c = px[j * W + k];
+        if (c >>> 24) this.dot(left + k, top + j, dmax, c);
+      }
+  }
+
+  fireSprite(frame: number): Sprite {
+    return this.sprites.fire(frame);
   }
 
   invalidateTile(i: number): void {
@@ -203,6 +250,9 @@ export class Renderer {
       case 'power':
         if (!wd.isConductor(i)) return -1;
         return wd.powered[i] ? 200 : 0;
+      case 'water':
+        if (!wd.isWaterConductor(i)) return -1;
+        return wd.watered[i] ? 200 : 0;
       case 'landValue':
         return wd.isWater(i) ? -1 : wd.landValue[i];
       case 'pollution':
@@ -226,7 +276,7 @@ export class Renderer {
 
   private overlayColor(v: number): Color {
     const q = Math.min(7, Math.floor(v / 32));
-    const good = this.overlay === 'landValue' || this.overlay === 'police' || this.overlay === 'fire' || this.overlay === 'edu' || this.overlay === 'health' || this.overlay === 'power';
+    const good = this.overlay === 'landValue' || this.overlay === 'police' || this.overlay === 'fire' || this.overlay === 'edu' || this.overlay === 'health' || this.overlay === 'power' || this.overlay === 'water';
     const t = good ? q / 7 : 1 - q / 7;
     // rot -> gelb -> grün
     const r = t < 0.5 ? 230 : Math.round(230 - (t - 0.5) * 2 * 170);
@@ -236,6 +286,33 @@ export class Renderer {
 
   private drawSprite(ctx: CanvasRenderingContext2D, s: Sprite, x: number, y: number): void {
     ctx.drawImage(s.cv, Math.round(x - s.ax), Math.round(y - s.ay));
+  }
+
+  /** Zeichnet ein Sprite in den Chunk und trägt seine deckenden Pixel mit Tiefe d in den Tiefenpuffer ein. */
+  private put(ctx: CanvasRenderingContext2D, s: Sprite, x: number, y: number, d: number): void {
+    const left = Math.round(x - s.ax);
+    const top = Math.round(y - s.ay);
+    ctx.drawImage(s.cv, left, top);
+    this.stamp(s, left, top, d, 0, s.cv.width);
+  }
+
+  private stamp(s: Sprite, left: number, top: number, d: number, sx0: number, sw: number): void {
+    const db = this.curDepth;
+    if (!db) return;
+    const px = spritePixels(s);
+    const W = s.cv.width;
+    const H = s.cv.height;
+    const ox = left - this.curCx;
+    const oy = top - this.curCy;
+    const xa = Math.max(sx0, -ox);
+    const xb = Math.min(sx0 + sw, CHUNK - ox, W);
+    const ya = Math.max(0, -oy);
+    const yb = Math.min(H, CHUNK - oy);
+    for (let y = ya; y < yb; y++) {
+      const row = y * W;
+      const drow = (y + oy) * CHUNK + ox;
+      for (let x = xa; x < xb; x++) if (px[row + x] >>> 24 > 128) db[drow + x] = d;
+    }
   }
 
   private drawTile(ctx: CanvasRenderingContext2D, i: number): void {
@@ -248,27 +325,28 @@ export class Renderer {
     const variant = (hash2(x, y, 5) * 4) | 0;
     const surf = this.surfaceKey(i);
     const sp = this.sprites;
-    this.drawSprite(ctx, sp.terrain(n - b, e - b, s - b, w - b, surf, variant), Nx, Ny);
+    const dg = (x + y) * 2 + 1; // Tiefe Gelände
+    const dobj = dg + 1; // Tiefe Objekte
+    this.put(ctx, sp.terrain(n - b, e - b, s - b, w - b, surf, variant), Nx, Ny, dg);
 
     // Kartenrand
     const midY = (x + y) * HH + this.OY + HH;
     if (x === wd.w - 1) {
-      const sk = sp.skirt(0, s, e, wd.isWater(i));
-      ctx.drawImage(sk.cv, Nx - sk.ax, midY - sk.ay);
+      this.put(ctx, sp.skirt(0, s, e, wd.isWater(i)), Nx, midY, dg);
     }
     if (y === wd.h - 1) {
-      const sk = sp.skirt(1, w, s, wd.isWater(i));
-      ctx.drawImage(sk.cv, Nx - HW - sk.ax, midY - sk.ay);
+      this.put(ctx, sp.skirt(1, w, s, wd.isWater(i)), Nx - HW, midY, dg);
     }
 
     if (this.overlay) {
       const v = this.overlayValue(i);
       if (v >= 0) this.drawSprite(ctx, sp.tint(n - b, e - b, s - b, w - b, this.overlayColor(v)), Nx, Ny);
+      if (this.overlay === 'water' && wd.pipe[i]) this.drawSprite(ctx, sp.terrain(n - b, e - b, s - b, w - b, `pipe:${this.pipeMask(i)}`, 0), Nx, Ny);
     }
 
     // Objekte
     const net = wd.net[i];
-    if (net & NET_ROAD && wd.isWater(i)) this.drawSprite(ctx, sp.bridge(wd.netMask(i, NET_ROAD)), Nx, Ny);
+    if (net & NET_ROAD && wd.isWater(i)) this.put(ctx, sp.bridge(wd.netMask(i, NET_ROAD)), Nx, Ny, dobj);
     if (wd.bld[i]) {
       const def = wd.bldDef(i)!;
       const o = wd.origin[i];
@@ -277,33 +355,49 @@ export class Renderer {
       const spr = sp.building(def);
       const oh = wd.minH(o);
       const [ONx, ONy] = this.tileN(ox, oy, oh);
-      if (def.size === 1) this.drawSprite(ctx, spr, ONx, ONy);
+      if (def.size === 1) this.put(ctx, spr, ONx, ONy, dobj);
       else {
         const strips = stripsFor(def.size)[y - oy][x - ox];
+        const left = Math.round(ONx - spr.ax);
+        const top = Math.round(ONy - spr.ay);
         for (const c of strips) {
           const sx = (def.size + c) * HW;
-          ctx.drawImage(spr.cv, sx, 0, HW, spr.cv.height, Math.round(ONx - spr.ax + sx), Math.round(ONy - spr.ay), HW, spr.cv.height);
+          ctx.drawImage(spr.cv, sx, 0, HW, spr.cv.height, left + sx, top, HW, spr.cv.height);
+          this.stamp(spr, left, top, dobj, sx, HW);
         }
       }
       return;
     }
     if (this.overlay) {
-      if (net & NET_POWER) this.drawPower(ctx, i, x, y, n, e, s, w, b, Nx, Ny);
+      if (net & NET_POWER) this.drawPower(ctx, i, n, e, s, w, b, Nx, Ny, dobj);
       return;
     }
     if (wd.zone[i] && wd.level[i] && !wd.rubble[i]) {
-      this.drawSprite(ctx, sp.zone(wd.zone[i] as Zone, wd.level[i], wd.variant[i]), Nx, Ny);
+      this.put(ctx, sp.zone(wd.zone[i] as Zone, wd.level[i], wd.variant[i]), Nx, Ny, dobj);
     } else if (wd.tree[i] && !net) {
       const pts = TREE_PTS[Math.min(3, wd.tree[i]) - 1];
       for (let k = 0; k < pts.length; k++) {
         const p = this.groundPt(x, y, pts[k][0], pts[k][1]);
-        this.drawSprite(ctx, sp.tree(((hash2(x, y, k) * 40) | 0) + k), p[0], p[1]);
+        this.put(ctx, sp.tree(((hash2(x, y, k) * 40) | 0) + k), p[0], p[1], dobj);
       }
     }
-    if (net & NET_POWER) this.drawPower(ctx, i, x, y, n, e, s, w, b, Nx, Ny);
+    if (net & NET_POWER) this.drawPower(ctx, i, n, e, s, w, b, Nx, Ny, dobj);
   }
 
-  private drawPower(ctx: CanvasRenderingContext2D, i: number, x: number, y: number, n: number, e: number, s: number, w: number, b: number, Nx: number, Ny: number): void {
+  /** Rohrverbindungen zu Nachbarn mit Rohr, Zone oder Gebäude. */
+  private pipeMask(i: number): number {
+    const wd = this.wd;
+    const x = i % wd.w;
+    const y = (i / wd.w) | 0;
+    let m = 0;
+    if (y > 0 && wd.isWaterConductor(i - wd.w)) m |= 1;
+    if (x < wd.w - 1 && wd.isWaterConductor(i + 1)) m |= 2;
+    if (y < wd.h - 1 && wd.isWaterConductor(i + wd.w)) m |= 4;
+    if (x > 0 && wd.isWaterConductor(i - 1)) m |= 8;
+    return m;
+  }
+
+  private drawPower(ctx: CanvasRenderingContext2D, i: number, n: number, e: number, s: number, w: number, b: number, Nx: number, Ny: number, d: number): void {
     const wd = this.wd;
     const water = wd.isWater(i);
     const lift = water ? HS : 0;
@@ -311,9 +405,7 @@ export class Renderer {
     const hc = rel((n + e + s + w) / 4);
     const he = [rel((n + e) / 2), rel((e + s) / 2), rel((s + w) / 2), rel((w + n) / 2)];
     const mask = wd.netMask(i, NET_POWER);
-    void x;
-    void y;
-    this.drawSprite(ctx, this.sprites.power(mask, Math.round(hc), he.map(Math.round), (wd.net[i] & NET_ROAD) !== 0), Nx, Ny);
+    this.put(ctx, this.sprites.power(mask, Math.round(hc), he.map(Math.round), (wd.net[i] & NET_ROAD) !== 0), Nx, Ny, d);
   }
 
   private renderChunk(ci: number): HTMLCanvasElement {
@@ -331,7 +423,14 @@ export class Renderer {
     const cy = Math.floor(ci / this.cols) * CHUNK;
     ctx.setTransform(1, 0, 0, 1, -cx, -cy);
     ctx.imageSmoothingEnabled = false;
+    let db = this.depth[ci];
+    if (!db) db = this.depth[ci] = new Uint16Array(CHUNK * CHUNK);
+    else db.fill(0);
+    this.curDepth = db;
+    this.curCx = cx;
+    this.curCy = cy;
     for (const i of this.chunkTiles[ci]) this.drawTile(ctx, i);
+    this.curDepth = null;
     this.dirty[ci] = 0;
     return cv;
   }
@@ -421,44 +520,14 @@ export class Renderer {
     const sp = this.sprites;
     const t = time / 1000;
 
-    // Autos
-    if (!this.overlay && this.cam.z >= 1) {
-      for (let y = y0; y <= y1; y++)
-        for (let x = x0; x <= x1; x++) {
-          const i = y * wd.w + x;
-          if (!(wd.net[i] & NET_ROAD) || wd.traffic[i] < 25) continue;
-          const mask = wd.netMask(i, NET_ROAD);
-          const cars = Math.min(4, 1 + Math.floor(wd.traffic[i] / 60));
-          const water = wd.isWater(i);
-          for (let k = 0; k < cars; k++) {
-            const h = hash2(x, y, k + 17);
-            const alongU = mask & 10 ? (mask & 5 ? k % 2 === 0 : true) : false;
-            const dir = k % 2 === 0 ? 1 : -1;
-            let p = (t * (0.35 + h * 0.2) + h) % 1;
-            if (dir < 0) p = 1 - p;
-            let u: number;
-            let v: number;
-            if (alongU) {
-              u = p;
-              v = dir > 0 ? 0.4 : 0.6;
-              if ((u < 0.5 && !(mask & 8)) || (u > 0.5 && !(mask & 2))) continue;
-            } else {
-              v = p;
-              u = dir > 0 ? 0.6 : 0.4;
-              if ((v < 0.5 && !(mask & 1)) || (v > 0.5 && !(mask & 4))) continue;
-            }
-            const g = this.groundPt(x, y, u, v);
-            const lift = water ? HS + 2 : 0;
-            ctx.fillStyle = CAR_COLORS[(h * CAR_COLORS.length) | 0];
-            ctx.fillRect(Math.round(g[0]) - 1, Math.round(g[1] - lift) - 2, 3, 2);
-            ctx.fillStyle = 'rgba(0,0,0,0.35)';
-            ctx.fillRect(Math.round(g[0]) - 1, Math.round(g[1] - lift), 3, 1);
-          }
-        }
-    }
-
-    // Feuer
-    if (this.sim && this.sim.burning.size) {
+    // Bewegte Objekte mit Verdeckung durch den Tiefenpuffer
+    const lw = Math.ceil(vx1) - Math.floor(vx0);
+    const lh = Math.ceil(vy1) - Math.floor(vy0);
+    if (!this.overlay && lw * lh <= 4_500_000) {
+      this.layer.begin(Math.floor(vx0), Math.floor(vy0), lw, lh);
+      this.fx.draw(time, x0, y0, x1, y1);
+      this.layer.flush(ctx);
+    } else if (this.sim && this.sim.burning.size) {
       const frame = Math.floor(t * 8) % 4;
       for (const i of this.sim.burning) {
         const x = i % wd.w;
@@ -473,9 +542,21 @@ export class Renderer {
     if (time - this.unpoweredAt > 1000) {
       this.unpoweredAt = time;
       this.unpowered = [];
+      this.dry = [];
       for (let i = 0; i < wd.w * wd.h; i++) {
-        if (wd.powered[i]) continue;
-        if ((wd.zone[i] && wd.level[i]) || (wd.bld[i] && wd.origin[i] === i && wd.bldDef(i)!.cat !== 'park')) this.unpowered.push(i);
+        if (!wd.powered[i]) {
+          if ((wd.zone[i] && wd.level[i]) || (wd.bld[i] && wd.origin[i] === i && wd.bldDef(i)!.cat !== 'park')) this.unpowered.push(i);
+        } else if (!wd.watered[i] && wd.zone[i] && wd.level[i] >= 3) this.dry.push(i);
+      }
+    }
+    if (Math.floor(t * 1.5) % 2 === 1) {
+      const drop = sp.drop();
+      for (const i of this.dry) {
+        const x = i % wd.w;
+        const y = (i / wd.w) | 0;
+        if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+        const g = this.groundPt(x, y, 0.5, 0.5);
+        this.drawSprite(ctx, drop, g[0], g[1] - 14);
       }
     }
     if (Math.floor(t * 1.5) % 2 === 0) {
@@ -583,4 +664,79 @@ const TREE_PTS: [number, number][][] = [
   ],
 ];
 
-const CAR_COLORS = ['#d83a2a', '#f0f0f0', '#2a5ad8', '#e8c020', '#303030', '#3a9a4a', '#a0a0a8'];
+const BLOCK = 128;
+
+/** Pixelpuffer in Weltauflösung für den sichtbaren Ausschnitt; nur berührte Blöcke werden übertragen. */
+class PixLayer {
+  x0 = 0;
+  y0 = 0;
+  w = 0;
+  h = 0;
+  private aw = 0;
+  private ah = 0;
+  private bw = 0;
+  private cv = document.createElement('canvas');
+  private ctx = this.cv.getContext('2d')!;
+  private img: ImageData | null = null;
+  private data = new Uint32Array(0);
+  private touched = new Uint8Array(0);
+
+  begin(x0: number, y0: number, w: number, h: number): void {
+    if (w > this.aw || h > this.ah) {
+      this.aw = Math.ceil(w / BLOCK) * BLOCK;
+      this.ah = Math.ceil(h / BLOCK) * BLOCK;
+      this.cv.width = this.aw;
+      this.cv.height = this.ah;
+      this.img = this.ctx.createImageData(this.aw, this.ah);
+      this.data = new Uint32Array(this.img.data.buffer);
+      this.bw = this.aw / BLOCK;
+      this.touched = new Uint8Array(this.bw * (this.ah / BLOCK));
+    }
+    this.x0 = x0;
+    this.y0 = y0;
+    this.w = w;
+    this.h = h;
+  }
+
+  plot(x: number, y: number, c: Color): void {
+    const k = y * this.aw + x;
+    const a = c >>> 24;
+    if (a === 255) this.data[k] = c;
+    else {
+      const d = this.data[k];
+      const da = d >>> 24;
+      if (!da) this.data[k] = c;
+      else {
+        const t = a / 255;
+        const f = (s: number) => Math.round(((d >>> s) & 255) * (1 - t) + ((c >>> s) & 255) * t);
+        this.data[k] = (((Math.max(a, da) << 24) | (f(16) << 16) | (f(8) << 8) | f(0)) >>> 0);
+      }
+    }
+    this.touched[(y >> 7) * this.bw + (x >> 7)] = 1;
+  }
+
+  flush(target: CanvasRenderingContext2D): void {
+    let bx0 = 1e9;
+    let by0 = 1e9;
+    let bx1 = -1;
+    let by1 = -1;
+    for (let b = 0; b < this.touched.length; b++) {
+      if (!this.touched[b]) continue;
+      this.touched[b] = 0;
+      const bx = b % this.bw;
+      const by = Math.floor(b / this.bw);
+      bx0 = Math.min(bx0, bx);
+      by0 = Math.min(by0, by);
+      bx1 = Math.max(bx1, bx);
+      by1 = Math.max(by1, by);
+    }
+    if (bx1 < 0) return;
+    const x = bx0 * BLOCK;
+    const y = by0 * BLOCK;
+    const w = (bx1 - bx0 + 1) * BLOCK;
+    const h = (by1 - by0 + 1) * BLOCK;
+    this.ctx.putImageData(this.img!, 0, 0, x, y, w, h);
+    target.drawImage(this.cv, x, y, w, h, this.x0 + x, this.y0 + y, w, h);
+    for (let r = y; r < y + h; r++) this.data.fill(0, r * this.aw + x, r * this.aw + x + w);
+  }
+}
