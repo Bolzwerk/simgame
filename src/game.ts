@@ -1,6 +1,6 @@
 // Laufendes Spiel: Schleife, Werkzeuge, Bedienoberfläche.
 
-import { BLD_MAX_H, BUILDING_BY_KEY, cityRank, COM_JOBS, IND_JOBS, NET_POWER, NET_ROAD, RES_POP, Zone } from './config';
+import { BLD_MAX_H, BUILDING_BY_KEY, cityRank, COM_JOBS, IND_JOBS, NET_POWER, NET_ROAD, PUMP_SHORE_BONUS, RES_POP, Zone } from './config';
 import { Input } from './input';
 import { Minimap } from './minimap';
 import { OVERLAYS, Overlay, Renderer } from './render';
@@ -59,6 +59,7 @@ export class Game {
   private plan: Plan | null = null;
   private messages: Message[] = [];
   private cats: Category[];
+  private autoOverlay = false;
   private openCat: string | null = null;
   private lastAutosaveMonth = -1;
   private hud: HTMLElement;
@@ -267,6 +268,18 @@ export class Game {
     this.tool = id;
     const cat = this.catOfTool[id];
     if (cat) this.lastTool[cat] = id;
+    // Rohre liegen unter der Erde: beim Wasserwerkzeug automatisch die Untergrundansicht zeigen
+    if (cat === 'water' && this.r.overlay !== 'water') {
+      this.autoOverlay = true;
+      this.r.setOverlay('water');
+      this.minimap.invalidate();
+    } else if (cat !== 'water' && this.autoOverlay) {
+      this.autoOverlay = false;
+      if (this.r.overlay === 'water') {
+        this.r.setOverlay(null);
+        this.minimap.invalidate();
+      }
+    }
     this.refreshToolbar();
     this.showToolHint();
   }
@@ -281,6 +294,8 @@ export class Game {
       const d = BUILDING_BY_KEY[id.slice(4)];
       const parts = [fmtMoney(d.cost)];
       if (d.power) parts.push(`${d.power} Stromeinheiten`);
+      if (d.water) parts.push(d.key === 'pump' ? `${d.water} Wassereinheiten, am Ufer mehr` : `${d.water} Wassereinheiten`);
+      if (d.cat === 'water') parts.push('braucht Strom');
       if (d.upkeep) parts.push(`Unterhalt ${fmtMoney(d.upkeep)}/Jahr`);
       return parts.join(' · ');
     }
@@ -354,6 +369,10 @@ export class Game {
         return spriteIcon('i-fire', sp.fire(0), 40);
       case 'road':
         return this.tileIcon('i-road', 'road:10');
+      case 'pipe':
+        return this.composite('i-pipe', 'grass', [sp.terrain(0, 0, 0, 0, 'pipe:10', 0)]);
+      case 'unpipe':
+        return this.composite('i-unpipe', 'rubble', [sp.terrain(0, 0, 0, 0, 'pipe:10', 0)]);
       case 'power':
         return this.composite('i-power', 'grass', [sp.power(10, 0, [0, 0, 0, 0], false)]);
       case 'zoneR':
@@ -380,6 +399,7 @@ export class Game {
       { id: 'terrain', label: 'Gelände', tools: ['raise', 'lower', 'level', 'trees', 'water', ...(sb ? ['ignite'] : [])], icon: () => this.toolIcon('raise') },
       { id: 'road', label: 'Straße', tools: ['road'], icon: () => this.toolIcon('road') },
       { id: 'power', label: 'Strom', tools: ['power', 'bld:wind', 'bld:gas', 'bld:coal', 'bld:nuclear', 'bld:solar'], icon: () => this.toolIcon('power') },
+      { id: 'water', label: 'Wasser', tools: ['pipe', 'bld:pump', 'bld:watertower', 'unpipe'], icon: () => this.toolIcon('bld:pump') },
       { id: 'res', label: 'Wohnen', tools: ['zoneR', 'zoneRd'], icon: () => this.toolIcon('zoneRd') },
       { id: 'com', label: 'Gewerbe', tools: ['zoneC', 'zoneCd'], icon: () => this.toolIcon('zoneCd') },
       { id: 'ind', label: 'Industrie', tools: ['zoneI', 'zoneId'], icon: () => this.toolIcon('zoneId') },
@@ -672,6 +692,7 @@ export class Game {
     if (wd.rubble[i]) title = 'Trümmer';
     if (wd.net[i] & NET_ROAD) title = wd.isWater(i) ? 'Brücke' : 'Straße';
     else if (wd.net[i] & NET_POWER) title = 'Stromleitung';
+    else if (wd.pipe[i] && wd.isEmpty(i) && !wd.tree[i]) title = 'Wasserrohr';
     if (wd.zone[i]) {
       const z = wd.zone[i];
       title = `${ZONE_NAMES[z]} (${wd.dense[i] ? 'dicht' : 'leicht'})`;
@@ -685,9 +706,11 @@ export class Game {
       const def = wd.bldDef(i)!;
       title = def.name;
       if (def.power) rows.push(['Leistung', `${def.power} Einheiten`]);
+      if (def.water) rows.push(['Fördermenge', `${def.water}${def.key === 'pump' ? ' (+' + PUMP_SHORE_BONUS + ' am Ufer)' : ''} Einheiten`]);
       if (def.upkeep) rows.push(['Unterhalt', `${fmtMoney(def.upkeep)}/Jahr`]);
     }
     if (wd.zone[i] || wd.bld[i] || wd.net[i] & NET_POWER) rows.push(['Strom', wd.powered[i] ? 'versorgt' : 'kein Strom']);
+    if (wd.isWaterConductor(i)) rows.push(['Wasser', wd.watered[i] ? 'versorgt' : wd.zone[i] ? 'kein Anschluss (nötig ab Stufe 3)' : 'kein Anschluss']);
     if (wd.isRoad(i)) rows.push(['Verkehr', pct(wd.traffic[i])]);
     if (!wd.isWater(i)) {
       rows.push(['Bodenwert', fmtMoney(wd.landValue[i] * 40)]);
@@ -867,7 +890,7 @@ export class Game {
         slider('Gesundheit', 0, 100, 10, () => wd.funding.health, (v) => (wd.funding.health = v), ' %', () => m(this.sim.budgetEstimate().upkeep.health)),
         slider('Bildung', 0, 100, 10, () => wd.funding.edu, (v) => (wd.funding.edu = v), ' %', () => m(this.sim.budgetEstimate().upkeep.edu)),
         slider('Verkehr', 0, 100, 10, () => wd.funding.transport, (v) => (wd.funding.transport = v), ' %', () => m(this.sim.budgetEstimate().upkeep.transport)),
-        el('div', { class: 'fixed' }, `Kraftwerke ${m(est.upkeep.power)} · Sonstiges ${m(est.upkeep.other)} · Zinsen ${m(est.interest)}`),
+        el('div', { class: 'fixed' }, `Strom & Wasser ${m(est.upkeep.power)} · Sonstiges ${m(est.upkeep.other)} · Zinsen ${m(est.interest)}`),
         sum,
       );
       if (!wd.sandbox) {
@@ -947,6 +970,7 @@ export class Game {
         ['Arbeitsplätze Industrie', fmtNum(wd.jobsI)],
         ['Arbeitslosigkeit', wd.pop ? `${Math.max(0, Math.round((1 - (wd.jobsC + wd.jobsI) / (wd.pop * 0.5)) * 100))} %` : '–'],
         ['Strom', `${fmtNum(wd.powerUsed)} / ${fmtNum(wd.powerCap)} Einheiten`],
+        ['Wasser', `${fmtNum(wd.waterUsed)} / ${fmtNum(wd.waterCap)} Einheiten`],
         ['Ø Bodenwert', fmtMoney(avg(lv) * 40)],
         ['Ø Verschmutzung', pct(avg(pol))],
         ['Ø Kriminalität', pct(avg(cr))],
@@ -1073,6 +1097,7 @@ export function openHelp(): void {
       el('li', {}, 'Wohngebiete brauchen Arbeitsplätze (Gewerbe oder Industrie) im selben Straßennetz, oder eine Straße zum Kartenrand.'),
       el('li', {}, 'Die Nachfrage-Anzeige oben (grün Wohnen, blau Gewerbe, gelb Industrie) zeigt, was gebraucht wird.'),
       el('li', {}, 'Leichte Zonen wachsen bis zu Häusern, dichte Zonen bis zu Hochhäusern, wenn Bodenwert und Einwohnerzahl hoch genug sind.'),
+      el('li', {}, 'Ab der dritten Stufe brauchen Gebäude Wasser: Wasserpumpen (am Ufer fördern sie mehr) oder Wassertürme bauen, mit Strom versorgen und mit Rohren an die Zonen anschließen. Zonen leiten Wasser wie Strom an Nachbarzonen weiter. Ein blauer Tropfen zeigt Gebäude ohne Wasser.'),
       el('li', {}, 'Polizei, Feuerwehr, Schulen, Krankenhäuser und Parks erhöhen den Bodenwert und senken Kriminalität und Brandgefahr.'),
       el('li', {}, 'Gebäude brauchen ebenen Boden. Das Werkzeug „Einebnen“ unter „Gelände“ hilft bei Hügeln.'),
     ),

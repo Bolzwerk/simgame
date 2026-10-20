@@ -17,7 +17,8 @@ Das Spiel passt sich an jedes Seitenverhältnis an. Auf dem Galaxy Z Fold läuft
 - **Schwierigkeit:** Leicht (20.000 $), Mittel (10.000 $), Schwer (5.000 $, teurer Unterhalt, häufigere Katastrophen) und **Sandkasten** (unbegrenztes Geld, alles freigeschaltet, Katastrophen nur auf Knopfdruck).
 - **Bedienung:** Mit einem Finger bauen (Straßen, Leitungen und Zonen durch Ziehen), mit zwei Fingern verschieben und zoomen. Das Info-Werkzeug zeigt Details zu einem Feld; mit ihm verschiebt ein Finger die Karte.
 - **Wachstum:** Kraftwerk bauen und per Leitung anschließen, Zonen ausweisen, Straßen in höchstens drei Feldern Entfernung. Die Nachfrage-Anzeige oben zeigt, was gebraucht wird. Polizei, Feuerwehr, Schulen, Krankenhäuser und Parks heben den Bodenwert, damit Hochhäuser entstehen.
-- **Ansichten:** Strom, Bodenwert, Verschmutzung, Kriminalität, Verkehr und Abdeckung der Dienste.
+- **Wasser:** Ab der dritten Bebauungsstufe brauchen Gebäude Wasser. Wasserpumpen (am Ufer ergiebiger) oder Wassertürme bauen, mit Strom versorgen und über unterirdische Rohre an die Zonen anschließen. Beim Rohrwerkzeug schaltet die Karte automatisch in die Untergrundansicht. Alte Spielstände haben zehn Spieljahre Schonfrist.
+- **Ansichten:** Strom, Wasser, Bodenwert, Verschmutzung, Kriminalität, Verkehr und Abdeckung der Dienste.
 - Spielstände: drei Speicherplätze plus automatisches Speichern.
 
 ## Entwicklung
@@ -42,9 +43,10 @@ Ohne SDK geht es auch mit den Ubuntu-Paketen `aapt dalvik-exchange apksigner zip
 
 | Ordner | Inhalt |
 | --- | --- |
-| `src/sim.ts` | Simulation: Strom, Wachstum, Verkehr, Umwelt, Finanzen, Katastrophen |
+| `src/sim.ts` | Simulation: Strom, Wasser, Wachstum, Verkehr, Umwelt, Finanzen, Katastrophen |
 | `src/sprites.ts`, `src/pix.ts` | Pixelgrafik-Erzeugung (Gelände, Straßen, Gebäude) |
-| `src/render.ts` | Isometrische Darstellung mit Chunk-Zwischenspeicher |
+| `src/render.ts` | Isometrische Darstellung mit Chunk-Zwischenspeicher und Tiefenpuffer |
+| `src/anim.ts` | Animationen: Autos, Fußgänger, Boote, Rauch, Windräder, Flugzeuge, Vögel |
 | `src/game.ts`, `src/ui.ts` | Bedienoberfläche, Werkzeugleiste, Dialoge |
 | `src/tools.ts`, `src/terrain.ts` | Bauwerkzeuge, Kartenerzeugung, Geländebearbeitung |
 | `android/` | Android-Hülle (WebView, Speichern, Zurück-Taste) |

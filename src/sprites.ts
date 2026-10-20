@@ -1,13 +1,24 @@
 // Prozedural erzeugte Pixelgrafik im isometrischen Stil.
 
 import { BLD_MAX_H, BuildingDef, HS, Zone } from './config';
-import { alpha, Color, hex, mix, mul, PixBuf, Pt, quad, ramp, rgb, Shader, triangle } from './pix';
+import { alpha, CANVAS_PIXELS, Color, hex, mix, mul, PixBuf, Pt, quad, ramp, rgb, Shader, triangle } from './pix';
 import { hash2, Rng } from './rng';
 
 export interface Sprite {
   cv: HTMLCanvasElement;
   ax: number; // Ankerpunkt (Nordecke der Kachel bzw. Stammfuß)
   ay: number;
+}
+
+/** Pixeldaten eines Sprites (einmalig gelesen und zwischengespeichert). */
+export function spritePixels(s: Sprite): Uint32Array {
+  let d = CANVAS_PIXELS.get(s.cv);
+  if (!d) {
+    const c = s.cv.getContext('2d')!;
+    d = new Uint32Array(c.getImageData(0, 0, s.cv.width, s.cv.height).data.buffer.slice(0));
+    CANVAS_PIXELS.set(s.cv, d);
+  }
+  return d;
 }
 
 // ---------------- Palette ----------------
@@ -140,6 +151,8 @@ export function surfaceShader(key: string, variant: number, grid: boolean): Surf
       };
     case 'road':
       return roadShader(parseInt(parts[1], 10), grid, variant);
+    case 'pipe':
+      return pipeShader(parseInt(parts[1], 10));
     case 'zone':
       return zoneShader(parseInt(parts[1], 10), parts[2] === '1', grid, variant);
     case 'lot':
@@ -195,6 +208,27 @@ function roadShader(mask: number, grid: boolean, variant: number): SurfaceShader
       if ((straightV || (!straightU && inU && !inV)) && Math.abs(u - 0.5) < 0.035 && dashV) c = hex('#d8c860');
     }
     return c;
+  };
+}
+
+/** Wasserrohre für die Untergrundansicht (außerhalb der Rohre durchsichtig). */
+function pipeShader(mask: number): SurfaceShader {
+  const P0 = 0.4;
+  const P1 = 0.6;
+  return (u, v, px, py, s) => {
+    const inU = u >= P0 && u <= P1;
+    const inV = v >= P0 && v <= P1;
+    let on = inU && inV;
+    if (inU && v < 0.5 && mask & 1) on = true;
+    if (inU && v > 0.5 && mask & 4) on = true;
+    if (inV && u > 0.5 && mask & 2) on = true;
+    if (inV && u < 0.5 && mask & 8) on = true;
+    if (!on) return 0;
+    // Rand dunkler, Mitte mit Glanzlicht
+    const du = inV && !inU ? Math.abs(v - 0.5) : inU && !inV ? Math.abs(u - 0.5) : Math.min(Math.abs(u - 0.5), Math.abs(v - 0.5));
+    if (du > 0.075) return mul(hex('#1c4f8a'), 1 + s);
+    if (du < 0.03) return mul(hex('#7fb8f0'), 1 + s);
+    return mul(hex('#3a7cc4'), 1 + s);
   };
 }
 
@@ -666,8 +700,7 @@ function serviceBuilding(def: BuildingDef): Sprite {
       buf.rect(b[0] - 1, b[1] - 30, 2, 30, hex('#e8e8e8'));
       buf.rect(b[0], b[1] - 30, 1, 30, hex('#b8b8b8'));
       buf.rect(b[0] - 2, b[1] - 33, 5, 3, hex('#d0d0d0'));
-      const hub: Pt = [b[0], b[1] - 32];
-      for (const a of [-Math.PI / 2, Math.PI / 6, (5 * Math.PI) / 6]) buf.line(hub[0], hub[1], hub[0] + Math.cos(a) * 12, hub[1] + Math.sin(a) * 12, hex('#f4f4f4'));
+      // Rotorblätter werden animiert in render.ts gezeichnet
       buf.set(b[0] + 1, b[1], alpha(BLACK, 80));
       break;
     }
@@ -723,6 +756,49 @@ function serviceBuilding(def: BuildingDef): Sprite {
         const y0 = 0.15 + k * 0.45;
         iso.face([0.15, y0, 5], [1.85, y0, 5], [1.85, y0 + 0.3, 1], [0.15, y0 + 0.3, 1], (u, v, px) => (px % 4 === 0 ? hex('#5c78a8') : hex('#22345e')));
       }
+      break;
+    }
+    case 'pump': {
+      iso.shadow(0.15, 0.25, 0.75, 0.8, 0.3);
+      tower(iso, r, 0.15, 0.25, 0.75, 0.8, 0, 11, hex('#d8d2c0'), hex('#34506e'), { floor: 11, period: 5, winW: 2, winH: 4, doors: true }, hex('#2f5f9a'));
+      // Rohrleitung und Ventilrad
+      iso.box(0.75, 0.45, 0.95, 0.6, 0, 4, hex('#4a8ad0'), hex('#3a7ac0'), hex('#2a5a90'));
+      iso.box(0.3, 0.05, 0.45, 0.25, 0, 6, hex('#4a8ad0'), hex('#3a7ac0'), hex('#2a5a90'));
+      const v = iso.p(0.85, 0.52, 7);
+      for (let k = -2; k <= 2; k++) {
+        buf.set(v[0] + k, v[1], hex('#c03020'));
+        buf.set(v[0], v[1] + k, hex('#c03020'));
+      }
+      break;
+    }
+    case 'watertower': {
+      iso.shadow(0.45, 0.45, 1.55, 1.55, 0.9);
+      const legs = [
+        [0.6, 0.6],
+        [1.4, 0.6],
+        [0.6, 1.4],
+        [1.4, 1.4],
+      ];
+      const legTop = 34;
+      for (const [lx, ly] of legs) iso.box(lx - 0.05, ly - 0.05, lx + 0.05, ly + 0.05, 0, legTop, hex('#8a8f96'), hex('#9aa0a8'), hex('#6a7078'));
+      for (const z of [10, 22]) {
+        const a = iso.p(0.6, 1.4, z);
+        const b = iso.p(1.4, 1.4, z + 8);
+        buf.line(a[0], a[1], b[0], b[1], hex('#70757c'));
+        const c = iso.p(1.4, 1.4, z);
+        const d = iso.p(1.4, 0.6, z + 8);
+        buf.line(c[0], c[1], d[0], d[1], hex('#5a6068'));
+      }
+      iso.cyl(1, 1, 0.62, legTop, legTop + 20, hex('#cfd8e2'), hex('#9fb0c2'));
+      const top = iso.p(1, 1, legTop + 20);
+      const rx = 0.62 * 22.6;
+      for (let y = 0; y < 9; y++) {
+        const half = Math.round((y / 9) * rx);
+        for (let x = -half; x <= half; x++) buf.set(top[0] + x, top[1] - 9 + y, mul(hex('#4a7ab8'), 1.15 - ((x / (rx + 1)) + 1) * 0.2));
+      }
+      // Schriftband
+      const band = iso.p(1, 1, legTop + 10);
+      for (let x = -9; x <= 9; x += 3) buf.set(band[0] + x, band[1] + 4, hex('#2a5a9a'));
       break;
     }
     case 'police': {
@@ -909,6 +985,23 @@ export function boltSprite(): Sprite {
   return { cv: buf.toCanvas(), ax: 4, ay: 9 };
 }
 
+/** Wassertropfen mit rotem Rand: kein Wasseranschluss. */
+export function dropSprite(): Sprite {
+  const rows = ['...#...', '...#...', '..###..', '.#####.', '#######', '#######', '#######', '.#####.', '..###..'];
+  const buf = new PixBuf(9, 11);
+  const blue = hex('#4aa0ff');
+  rows.forEach((row, y) => [...row].forEach((ch, x) => ch === '#' && buf.set(x + 1, y + 1, blue)));
+  buf.set(3, 5, hex('#d8ecff'));
+  buf.set(3, 6, hex('#d8ecff'));
+  for (let y = 0; y < 11; y++)
+    for (let x = 0; x < 9; x++) {
+      if (buf.get(x, y)) continue;
+      const b = (xx: number, yy: number) => buf.get(xx, yy) === blue;
+      if (b(x - 1, y) || b(x + 1, y) || b(x, y - 1) || b(x, y + 1)) buf.set(x, y, hex('#a01010'));
+    }
+  return { cv: buf.toCanvas(), ax: 4, ay: 11 };
+}
+
 // ---------------- Cache ----------------
 
 export class SpriteCache {
@@ -965,6 +1058,9 @@ export class SpriteCache {
   }
   bolt(): Sprite {
     return this.get('bolt', () => boltSprite());
+  }
+  drop(): Sprite {
+    return this.get('drop', () => dropSprite());
   }
 }
 

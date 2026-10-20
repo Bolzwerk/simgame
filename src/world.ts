@@ -1,6 +1,6 @@
 // Spielzustand: Gelände, Bebauung, Wirtschaft.
 
-import { BUILDINGS, BuildingDef, Difficulty, DIFFICULTIES, NET_POWER, NET_ROAD } from './config';
+import { BUILDINGS, BuildingDef, Difficulty, DIFFICULTIES, NET_POWER, NET_ROAD, WATER_GRACE_MONTHS } from './config';
 import { Rng } from './rng';
 
 export interface Funding {
@@ -58,6 +58,8 @@ const TILE_ARRAYS = [
   'covHealth',
   'covEdu',
   'access',
+  'pipe',
+  'watered',
 ] as const;
 type TileArrayName = (typeof TILE_ARRAYS)[number];
 
@@ -88,6 +90,8 @@ export class World {
   covHealth!: Uint8Array;
   covEdu!: Uint8Array;
   access!: Uint8Array; // Straßennetz-Erreichbarkeit (Bitmaske R/C/I/Rand)
+  pipe!: Uint8Array; // unterirdische Wasserleitung
+  watered!: Uint8Array;
   origin: Int32Array;
 
   funds = 10000;
@@ -108,6 +112,10 @@ export class World {
   demandI = 0.4;
   powerCap = 0;
   powerUsed = 0;
+  waterCap = 0;
+  waterUsed = 0;
+  /** Restmonate ohne Verfall von Hochhäusern ohne Wasser (alte Spielstände). */
+  waterGrace = 0;
   monthsNegative = 0;
   gameOver = false;
   yearIncome = 0;
@@ -186,6 +194,11 @@ export class World {
 
   isConductor(i: number): boolean {
     return (this.net[i] & NET_POWER) !== 0 || this.zone[i] !== 0 || this.bld[i] !== 0;
+  }
+
+  /** Leitet Wasser: Rohre, Zonen und Gebäude. */
+  isWaterConductor(i: number): boolean {
+    return this.pipe[i] !== 0 || this.zone[i] !== 0 || this.bld[i] !== 0;
   }
 
   isRoad(i: number): boolean {
@@ -346,6 +359,7 @@ export class World {
       lastReport: this.lastReport,
       history: this.history,
       milestone: this.milestone,
+      waterGrace: this.waterGrace,
       settings: this.settings,
       rng: this.rng.state,
     };
@@ -380,6 +394,8 @@ export class World {
     wd.lastReport = d.lastReport || null;
     wd.history = d.history || wd.history;
     wd.milestone = d.milestone || 0;
+    // Spielstände von vor der Wasserversorgung bekommen eine Schonfrist
+    wd.waterGrace = d.tiles.watered ? d.waterGrace || 0 : WATER_GRACE_MONTHS;
     wd.settings = { ...wd.settings, ...d.settings };
     wd.rng.state = d.rng || 1;
     wd.powerDirty = true;

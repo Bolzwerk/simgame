@@ -73,6 +73,7 @@ export class Minimap {
         else if (overlay === 'edu') v = wd.covEdu[i];
         else if (overlay === 'health') v = wd.covHealth[i];
         else if (overlay === 'power') v = wd.isConductor(i) ? (wd.powered[i] ? 255 : 0) : -1;
+        else if (overlay === 'water') v = wd.isWaterConductor(i) ? (wd.watered[i] ? 255 : 0) : -1;
         if (v >= 0 && !wd.isWater(i)) {
           const t = v / 255;
           c = [230 - t * 170, 60 + t * 160, 50];

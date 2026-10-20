@@ -7,9 +7,11 @@ import {
   IND_JOBS,
   NET_POWER,
   NET_ROAD,
+  PUMP_SHORE_BONUS,
   RES_POP,
   TICKS_PER_MONTH,
   UPKEEP,
+  WATER_GRACE_MONTHS,
   Zone,
 } from './config';
 import { World, YearReport } from './world';
@@ -39,6 +41,8 @@ const ACC_EDGE = 16;
 
 export class Simulation {
   burning = new Set<number>();
+  /** Kacheln, auf denen gerade gebaut wurde (für den Baustaub in der Darstellung). */
+  built: number[] = [];
   tornado: Tornado | null = null;
   private lastMsg = new Map<string, number>();
   private compOf: Int32Array;
@@ -143,6 +147,90 @@ export class Simulation {
     wd.powerCap = cap;
     wd.powerUsed = Math.max(used, demand);
     for (let i = 0; i < n; i++) if (prev[i] !== powered[i] && wd.bld[i]) wd.changed(i);
+    this.computeWater();
+  }
+
+  // ---------------- Wasser ----------------
+
+  /** Verteilt Wasser von Pumpen und Wassertürmen (mit Strom) über Rohre, Zonen und Gebäude. */
+  computeWater(): void {
+    const wd = this.wd;
+    const n = wd.w * wd.h;
+    const w = wd.w;
+    const watered = wd.watered;
+    const prev = watered.slice();
+    watered.fill(0);
+    const seen = new Uint8Array(n);
+    const queue = new Int32Array(n);
+    let qt = 0;
+    let cap = 0;
+    for (let o = 0; o < n; o++) {
+      if (wd.origin[o] !== o) continue;
+      const def = wd.bldDef(o);
+      if (!def || def.cat !== 'water' || !wd.powered[o]) continue;
+      cap += (def.water || 0) + (def.key === 'pump' && this.atShore(o, def.size) ? PUMP_SHORE_BONUS : 0);
+      for (let dy = 0; dy < def.size; dy++)
+        for (let dx = 0; dx < def.size; dx++) {
+          const j = o + dy * w + dx;
+          seen[j] = 1;
+          watered[j] = 1;
+          queue[qt++] = j;
+        }
+    }
+    let used = 0;
+    let demand = 0;
+    let qh = 0;
+    while (qh < qt) {
+      const i = queue[qh++];
+      const x = i % w;
+      const y = (i / w) | 0;
+      for (let k = 0; k < 4; k++) {
+        let j: number;
+        if (k === 0) {
+          if (y === 0) continue;
+          j = i - w;
+        } else if (k === 1) {
+          if (x === w - 1) continue;
+          j = i + 1;
+        } else if (k === 2) {
+          if (y === wd.h - 1) continue;
+          j = i + w;
+        } else {
+          if (x === 0) continue;
+          j = i - 1;
+        }
+        if (seen[j] || !wd.isWaterConductor(j)) continue;
+        seen[j] = 1;
+        queue[qt++] = j;
+        let cons = 0;
+        if (wd.zone[j]) cons = wd.level[j];
+        else if (wd.bld[j]) {
+          const c = wd.bldDef(j)!.cat;
+          cons = c === 'water' || c === 'park' ? 0 : 2;
+        }
+        demand += cons;
+        if (used + cons <= cap) {
+          used += cons;
+          watered[j] = 1;
+        }
+      }
+    }
+    wd.waterCap = cap;
+    wd.waterUsed = Math.max(used, demand);
+    for (let i = 0; i < n; i++) if (prev[i] !== watered[i] && (wd.bld[i] || wd.pipe[i])) wd.changed(i);
+  }
+
+  private atShore(o: number, size: number): boolean {
+    const wd = this.wd;
+    const ox = o % wd.w;
+    const oy = (o / wd.w) | 0;
+    for (let dy = -1; dy <= size; dy++)
+      for (let dx = -1; dx <= size; dx++) {
+        const x = ox + dx;
+        const y = oy + dy;
+        if (wd.inb(x, y) && wd.isWater(wd.idx(x, y))) return true;
+      }
+    return false;
   }
 
   // ---------------- Wachstum ----------------
@@ -196,7 +284,9 @@ export class Simulation {
         if (!(acc & (ACC_R | ACC_EDGE))) score -= 0.7;
       }
       score -= Math.max(0, this.nearTraffic(i) - 160) / 400;
-      const maxL = Math.min(wd.dense[i] ? 4 : 2, this.levelCap(z, lv));
+      let maxL = Math.min(wd.dense[i] ? 4 : 2, this.levelCap(z, lv));
+      // ab Stufe 3 braucht es fließendes Wasser; alte Spielstände behalten ihre Hochhäuser eine Weile
+      if (!wd.watered[i]) maxL = Math.min(maxL, wd.waterGrace > 0 ? Math.max(2, L) : 2);
       if (score > 0 && L < maxL) {
         const p = Math.min(1, score) * 0.06 * g * (L === 0 ? 1.5 : 1 / L);
         if (rng.chance(p)) this.setLevel(i, L + 1);
@@ -222,7 +312,10 @@ export class Simulation {
 
   private setLevel(i: number, L: number): void {
     const wd = this.wd;
-    if (L > wd.level[i]) wd.variant[i] = wd.rng.int(256);
+    if (L > wd.level[i]) {
+      wd.variant[i] = wd.rng.int(256);
+      if (this.built.length < 500) this.built.push(i);
+    }
     wd.level[i] = L;
     wd.changed(i);
   }
@@ -249,7 +342,7 @@ export class Simulation {
     const rng = wd.rng;
     const fund = wd.funding.fire / 100;
     for (const i of Array.from(this.burning)) {
-      const cov = (wd.covFire[i] / 255) * fund;
+      const cov = (wd.covFire[i] / 255) * fund + (wd.watered[i] ? 0.15 : 0);
       if (rng.chance(0.04 + cov * 0.35)) {
         wd.fire[i] = 0;
         this.burning.delete(i);
@@ -365,6 +458,7 @@ export class Simulation {
     this.finances();
     this.disasters();
     this.advise();
+    if (wd.waterGrace > 0) wd.waterGrace--;
 
     wd.month++;
     const h = wd.history;
@@ -579,6 +673,7 @@ export class Simulation {
       v -= wd.crime[i] * 0.2;
       v -= this.nearTraffic(i) * 0.15;
       if (wd.zone[i] && wd.level[i] >= 3) v += 15;
+      if (wd.watered[i]) v += 8;
       wd.landValue[i] = clamp255(v);
     }
     const lvs = blur(Float32Array.from(wd.landValue), w, h, 1);
@@ -656,13 +751,15 @@ export class Simulation {
     };
     let roads = 0;
     let power = 0;
+    let pipes = 0;
     const svc: Record<string, number> = { police: 0, fire: 0, health: 0, edu: 0, transport: 0, power: 0, other: 0 };
     for (let i = 0; i < wd.w * wd.h; i++) {
       if (wd.net[i] & NET_ROAD) roads += wd.isWater(i) ? 4 : 1;
       if (wd.net[i] & NET_POWER) power++;
+      if (wd.pipe[i]) pipes++;
       if (wd.origin[i] === i) {
         const def = wd.bldDef(i)!;
-        const key = def.coverage || (def.cat === 'power' ? 'power' : 'other');
+        const key = def.coverage || (def.cat === 'power' || def.cat === 'water' ? 'power' : 'other');
         svc[key] += def.upkeep;
       }
     }
@@ -672,7 +769,7 @@ export class Simulation {
       fire: svc.fire * um * (wd.funding.fire / 100),
       health: svc.health * um * (wd.funding.health / 100),
       edu: svc.edu * um * (wd.funding.edu / 100),
-      transport: (roads * UPKEEP.road + power * UPKEEP.power) * um * (wd.funding.transport / 100),
+      transport: (roads * UPKEEP.road + power * UPKEEP.power + pipes * UPKEEP.pipe) * um * (wd.funding.transport / 100),
       power: svc.power * um,
       other: svc.other * um,
     };
@@ -757,6 +854,12 @@ export class Simulation {
     if (zones > 8 && wd.powerCap === 0) this.say('noplant', 'Ihre Zonen brauchen Strom. Bauen Sie ein Kraftwerk und verbinden Sie es mit Leitungen.', 'warn', 6);
     else if (zones > 8 && unpowered > zones * 0.2) this.say('nopower', 'Viele Zonen haben keinen Strom. Prüfen Sie Leitungen und Kraftwerkskapazität.', 'warn', 6);
     if (wd.powerCap > 0 && wd.powerUsed > wd.powerCap * 0.92) this.say('cap', 'Die Kraftwerke sind fast ausgelastet. Bauen Sie bald ein weiteres.', 'warn', 6);
+    if (wd.pop > 1200 && wd.waterCap === 0)
+      this.say('nowater', 'Ohne Wasserversorgung bleibt es bei kleinen Häusern. Bauen Sie Pumpen (am besten am Ufer) und verlegen Sie Rohre zu den Zonen.', 'warn', 12);
+    else if (wd.waterCap > 0 && wd.waterUsed > wd.waterCap) this.say('watercap', 'Das Wasser reicht nicht für alle. Bauen Sie weitere Pumpen oder einen Wasserturm.', 'warn', 6);
+    if (wd.waterGrace === WATER_GRACE_MONTHS)
+      this.say('waternew', 'Neu: Wasserversorgung! Hochhäuser brauchen jetzt Wasser. Sie haben 10 Jahre Zeit, Pumpen oder Wassertürme zu bauen und mit Rohren anzuschließen.', 'info', 999);
+    if (wd.waterGrace === 1) this.say('grace', 'Hochhäuser ohne Wasseranschluss verfallen ab jetzt langsam.', 'warn', 24);
     if (zones > 8 && noRoad > zones * 0.3) this.say('noroad', 'Zonen brauchen eine Straße in höchstens 3 Feldern Entfernung.', 'warn', 6);
     if (wd.pop > 2000) {
       let pol = 0;
